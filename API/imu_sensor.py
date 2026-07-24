@@ -372,19 +372,19 @@ class IMUSensor:
         # Roll (x-axis rotation)
         sinr_cosp = 2 * (qw * qx + qy * qz)
         cosr_cosp = 1 - 2 * (qx * qx + qy * qy)
-        pitch = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
+        yaw = math.degrees(math.atan2(sinr_cosp, cosr_cosp))
 
         # Pitch (y-axis rotation)
         sinp = 2 * (qw * qy - qz * qx)
         if abs(sinp) >= 1:
-            roll = math.copysign(90, sinp)
+            pitch = math.copysign(90, sinp)
         else:
-            roll = math.degrees(math.asin(sinp))
+            pitch = math.degrees(math.asin(sinp))
 
         # Yaw (z-axis rotation)
         siny_cosp = 2 * (qw * qz + qx * qy)
         cosy_cosp = 1 - 2 * (qy * qy + qz * qz)
-        yaw = math.degrees(math.atan2(siny_cosp, cosy_cosp))
+        roll = math.degrees(math.atan2(siny_cosp, cosy_cosp))
 
         return (pitch, roll, yaw)
 
