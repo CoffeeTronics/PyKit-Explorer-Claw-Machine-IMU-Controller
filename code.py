@@ -100,7 +100,7 @@ print("[CENTRAL] Starting IMU tilt transmission. Press Ctrl-C to stop.")
 while True:
     # ── 1. Read pitch, roll, yaw from BNO085 game rotation vector ─────────────
     try:
-        yaw, roll, pitch = imu.euler_angles_game
+        roll, pitch, yaw = imu.euler_angles_game
     except OSError as e:
         print(f"[CENTRAL] IMU read error: {e}, skipping...")
         time.sleep(LOOP_DT)
@@ -109,9 +109,9 @@ while True:
     # ── 2. Deadzone - suppress transmission when near-flat ────────────────────
     magnitude = math.sqrt(pitch**2 + roll**2)
     if magnitude >= DEADZONE:
-        msg = f"{pitch:.1f} {roll:.1f}\n"
+        msg = f"{pitch:.1f} {roll:.1f} {yaw:.1f}\n"
     else:
-        msg = "0.0 0.0\n"  # arm holds position
+        msg = "0.0 0.0 0.0\n"  # arm holds position
 
     # ── 3. Transmit ───────────────────────────────────────────────────────────
     print(f"[CENTRAL] TX: {msg.strip()}  (roll={roll:.1f} pitch={pitch:.1f} yaw={yaw:.1f})")
