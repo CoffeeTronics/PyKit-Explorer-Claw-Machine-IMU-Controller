@@ -15,7 +15,8 @@ CLAW_RX_1292
 - **Board**: PyKit Explorer
 - **IMU**: BNO085 (using game rotation vector - gyro + accel fusion, no magnetometer)
 - **BLE Module**: RNBD451
-- **User Button**: Pin D3 (active-low with pull-up)
+- **Calibrate Button**: Pin D3 (active-low with pull-up) - Set zero point / re-calibrate
+- **Drop Claw Button**: Pin D5 (active-low with pull-up) - Trigger claw drop
 - **Display**: ST7789 240x135 TFT LCD
 
 ## State Machine
@@ -24,7 +25,7 @@ CLAW_RX_1292
 
 | State | Description |
 |-------|-------------|
-| `INITIALIZATION` | Initialize LCD, BLE module, IMU, and button |
+| `INITIALIZATION` | Initialize LCD, BLE module, IMU, and buttons |
 | `SCANNING_FOR_CLAW` | Scan for target BLE peripheral (max 3 attempts) |
 | `CONNECTING_BLE` | Connect to target and wait for STREAM_OPEN |
 | `BLE_CONNECTED` | Connection confirmed, display success message |
@@ -32,6 +33,7 @@ CLAW_RX_1292
 | `SEND_ZERO_POSITION` | Send "Move to Home Position" command to Claw |
 | `START_IMU_TX` | Display transmission starting message |
 | `SEND_IMU_DATA` | Main loop - transmit zero-referenced IMU data |
+| `DROPPING_CLAW` | Lock IMU values, send drop command, wait for completion |
 | `BLE_DISCONNECTED` | Handle disconnect, attempt reconnection |
 | `HALTED` | Fatal error - requires manual reset |
 
@@ -52,17 +54,21 @@ CONNECTING_BLE         |
 BLE_CONNECTED          |
       |                |
       v                |
-CALIBRATE_ZERO <-------+------+
-      |                       |
-      | (button press)        | (re-calibration)
-      v                       |
-SEND_ZERO_POSITION            |
-      |                       |
-      v                       |
-START_IMU_TX                  |
-      |                       |
-      v                       |
-SEND_IMU_DATA ----------------+
+CALIBRATE_ZERO <-------+------+--------------------+
+      |                       |                    |
+      | (D3 button press)     | (re-calibration)   | (claw drop complete)
+      v                       |                    |
+SEND_ZERO_POSITION            |                    |
+      |                       |                    |
+      v                       |                    |
+START_IMU_TX                  |                    |
+      |                       |                    |
+      v                       |                    |
+SEND_IMU_DATA ----------------+                    |
+      |                                            |
+      | (D5 button press)                          |
+      v                                            |
+DROPPING_CLAW --------->(3 sec delay)>-------------+
       |
       | (BLE error)
       v
@@ -81,32 +87,46 @@ BLE_DISCONNECTED --> SCANNING_FOR_CLAW
 | CALIBRATE_ZERO (calibrating) | White | Red | "Calibrating Zero / Position. / Do Not Move" |
 | START_IMU_TX | Black | White | "Starting IMU / Transmission" |
 | SEND_IMU_DATA | Black | White | Live pitch/roll/yaw values |
+| DROPPING_CLAW | Green | Yellow | "Dropping Claw" |
 | BLE_DISCONNECTED | Black | White | "BLE Connection / Lost - Retrying / to Connect" |
 | HALTED (scan fail) | Black | White | "Target Peripheral / Not Found, / Reset PyKit" |
 | HALTED (connect fail) | Black | White | "Connect to Claw / Failed, / Reset PyKit" |
+| HALTED (scan error) | Black | White | "Scan Failed / Reset PyKit" |
 
 ## BLE Message Format
 
 ### Transmitted to Claw
 
 **Home position command** (sent once after calibration):
+
 ```
 Move to Home Position\n
 ```
 
 **IMU data** (sent every 200ms):
+
 ```
 {pitch} {roll} {yaw}\n
 ```
+
 Example: `"12.3 -5.6 45.2\n"`
 
 All values are zero-referenced (relative to calibration point). Yaw is normalized to -180 to +180 range.
+
+**Drop claw command** (sent when D5 button pressed):
+
+```
+Drop Claw\n
+```
+
+During the drop claw sequence, IMU values are locked and continue transmitting at the frozen position.
 
 ## Error Recovery
 
 - **IMU errors**: After 5 consecutive read errors (OSError or KeyError), the game rotation vector feature is re-enabled to recover from sensor reset
 - **BLE disconnect**: Automatically returns to scanning state and attempts reconnection
 - **Scan failure**: After 3 failed scan attempts, halts and displays error message
+- **Scan errors**: RNBD451Error exceptions during scanning are caught and retried (up to MAX_SCAN_ATTEMPTS)
 
 ## Constants
 
@@ -117,3 +137,4 @@ All values are zero-referenced (relative to calibration point). Yaw is normalize
 | `STREAM_OPEN_TIMEOUT` | 10.0s | Wait time for STREAM_OPEN |
 | `BLE_CONNECTED_DISPLAY_TIME` | 2.0s | Duration of "BLE Connected" message |
 | `IMU_START_DISPLAY_TIME` | 3.0s | Duration of "Starting IMU" message |
+| `DROPPING_CLAW_DELAY` | 3.0s | Duration to hold locked values during drop |

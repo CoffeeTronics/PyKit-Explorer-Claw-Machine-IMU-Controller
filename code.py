@@ -22,6 +22,7 @@ STATE_START_IMU_TX = "START_IMU_TX"
 STATE_SEND_IMU_DATA = "SEND_IMU_DATA"
 STATE_BLE_DISCONNECTED = "BLE_DISCONNECTED"
 STATE_HALTED = "HALTED"
+STATE_DROPPING_CLAW = "DROPPING_CLAW"
 
 TARGET_NAME = "CLAW_RX_1292"
 LOOP_DT = 0.2
@@ -29,6 +30,7 @@ MAX_SCAN_ATTEMPTS = 3
 STREAM_OPEN_TIMEOUT = 10.0
 BLE_CONNECTED_DISPLAY_TIME = 2.0
 IMU_START_DISPLAY_TIME = 3.0
+DROPPING_CLAW_DELAY = 3.0
 
 current_state = STATE_INITIALIZATION
 scan_attempts = 0
@@ -38,6 +40,10 @@ zero_roll = 0.0
 zero_pitch = 0.0
 zero_yaw = 0.0
 imu_error_count = 0
+locked_pitch = 0.0
+locked_roll = 0.0
+locked_yaw = 0.0
+drop_command_sent = False
 
 def update_lcd(text1, text2="", text3="", bg_color=Colors.BLACK, text_color=Colors.WHITE):
     global group, palette, line1, line2, line3
@@ -56,7 +62,7 @@ def enter_state(new_state):
     print("[STATE] Entering " + new_state)
 
 def handle_initialization():
-    global ble, imu, lcd, group, palette, line1, line2, line3, button, reset_pin, uart
+    global ble, imu, lcd, group, palette, line1, line2, line3, button, drop_claw_button, reset_pin, uart
     lcd = LCDDisplay()
     lcd.backlight_on()
     group, palette = lcd.make_group(Colors.BLACK)
@@ -71,6 +77,7 @@ def handle_initialization():
     imu = IMUSensor()
     imu.enable_game_rotation_vector()
     button = EdgeDetector(board.D3)
+    drop_claw_button = EdgeDetector(board.D5)
     print("[CENTRAL] Hard-resetting module...")
     ble.hard_reset(delay=0.1, settle=2.0)
     print("[CENTRAL] Reset complete")
@@ -81,11 +88,23 @@ def handle_initialization():
     ble.set_pairing_mode(mode=0)
     enter_state(STATE_SCANNING_FOR_CLAW)
 
+
 def handle_scanning():
     global scan_attempts, target
     update_lcd("Searching for", "target", "peripheral...")
     print("[CENTRAL] Scanning attempt " + str(scan_attempts + 1))
-    devices = ble.scan(interval_ms=100, window_ms=80)
+    try:
+        devices = ble.scan(interval_ms=100, window_ms=80)
+    except RNBD451Error as e:
+        print("[CENTRAL] Scan error: " + str(e))
+        scan_attempts += 1
+        if scan_attempts >= MAX_SCAN_ATTEMPTS:
+            update_lcd("Scan Failed", "Reset PyKit")
+            enter_state(STATE_HALTED)
+        else:
+            print("[CENTRAL] Retrying scan...")
+            time.sleep(1)
+        return
     print("[CENTRAL] Found " + str(len(devices)) + " devices")
     for dev in devices:
         addr = dev["address"]
@@ -162,9 +181,11 @@ def handle_start_imu_tx():
     if time.monotonic() - state_entry_time > IMU_START_DISPLAY_TIME:
         enter_state(STATE_SEND_IMU_DATA)
 
+
 def handle_send_imu_data():
-    global imu_error_count
+    global imu_error_count, locked_pitch, locked_roll, locked_yaw
     button.update()
+    drop_claw_button.update()
     if button.fell:
         print("[CENTRAL] Re-calibration requested")
         enter_state(STATE_CALIBRATE_ZERO)
@@ -190,6 +211,13 @@ def handle_send_imu_data():
         rel_yaw -= 360
     elif rel_yaw < -180:
         rel_yaw += 360
+    if drop_claw_button.fell:
+        print("[CENTRAL] Drop claw requested")
+        locked_pitch = rel_pitch
+        locked_roll = rel_roll
+        locked_yaw = rel_yaw
+        enter_state(STATE_DROPPING_CLAW)
+        return
     p = str(round(rel_pitch,1))
     r = str(round(rel_roll,1))
     y = str(round(rel_yaw,1))
@@ -210,6 +238,37 @@ def handle_send_imu_data():
         print("[CENTRAL] BLE read error")
         enter_state(STATE_BLE_DISCONNECTED)
 
+def handle_dropping_claw():
+    global drop_command_sent
+    if time.monotonic() - state_entry_time < 0.3:
+        update_lcd("Dropping Claw", bg_color=Colors.GREEN, text_color=Colors.YELLOW)
+        if not drop_command_sent:
+            print("[CENTRAL] Sending Drop Claw")
+            ble.write(b"Drop Claw\n")
+            drop_command_sent = True
+    p = str(round(locked_pitch,1))
+    r = str(round(locked_roll,1))
+    y = str(round(locked_yaw,1))
+    msg = p + " " + r + " " + y + "\n"
+    print("[CENTRAL] TX (locked): " + msg.strip())
+    try:
+        ble.write(msg.encode())
+    except Exception as e:
+        print("[CENTRAL] BLE write error")
+        enter_state(STATE_BLE_DISCONNECTED)
+        return
+    try:
+        rx = ble.read_available()
+        if rx:
+            print("[CENTRAL] RX: " + rx.decode().strip())
+    except Exception as e:
+        print("[CENTRAL] BLE read error")
+        enter_state(STATE_BLE_DISCONNECTED)
+        return
+    if time.monotonic() - state_entry_time > DROPPING_CLAW_DELAY:
+        print("[CENTRAL] Claw drop complete, returning to calibration")
+        drop_command_sent = False
+        enter_state(STATE_CALIBRATE_ZERO)
 
 def handle_ble_disconnected():
     global scan_attempts
@@ -242,6 +301,7 @@ STATE_HANDLERS = {
     STATE_SEND_IMU_DATA: handle_send_imu_data,
     STATE_BLE_DISCONNECTED: handle_ble_disconnected,
     STATE_HALTED: handle_halted,
+    STATE_DROPPING_CLAW: handle_dropping_claw,
 }
 
 print("[CENTRAL] Starting state machine...")
