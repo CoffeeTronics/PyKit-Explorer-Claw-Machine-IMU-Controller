@@ -8,6 +8,7 @@ from rnbd451 import RNBD451, RNBD451Error
 from imu_sensor import IMUSensor
 from lcd_display import LCDDisplay, Colors
 from digital_io import EdgeDetector
+from uart_comms import UARTComms
 
 import supervisor
 supervisor.runtime.autoreload = False
@@ -62,7 +63,7 @@ def enter_state(new_state):
     print("[STATE] Entering " + new_state)
 
 def handle_initialization():
-    global ble, imu, lcd, group, palette, line1, line2, line3, button, drop_claw_button, reset_pin, uart
+    global ble, imu, lcd, group, palette, line1, line2, line3, button, drop_claw_button, reset_pin, uart, de9_uart
     lcd = LCDDisplay()
     lcd.backlight_on()
     group, palette = lcd.make_group(Colors.BLACK)
@@ -74,6 +75,8 @@ def handle_initialization():
     reset_pin.value = True
     uart = busio.UART(board.BLE_TX, board.BLE_RX, baudrate=115200, timeout=0.1)
     ble = RNBD451(uart, reset_pin=reset_pin)
+    de9_uart = UARTComms(tx=board.DEBUG_TX, rx=board.DEBUG_RX, baudrate=115200, timeout=0.1)
+    print("[CENTRAL] DE9 UART initialized")
     imu = IMUSensor()
     imu.enable_game_rotation_vector()
     button = EdgeDetector(board.D3)
@@ -230,6 +233,10 @@ def handle_send_imu_data():
         print("[CENTRAL] BLE write error")
         enter_state(STATE_BLE_DISCONNECTED)
         return
+    de9_uart.send(msg)
+    de9_rx = de9_uart.receive(64)
+    if de9_rx:
+        print("[UART_DE9] RX: " + de9_rx.strip())
     try:
         rx = ble.read_available()
         if rx:
@@ -257,6 +264,10 @@ def handle_dropping_claw():
         print("[CENTRAL] BLE write error")
         enter_state(STATE_BLE_DISCONNECTED)
         return
+    de9_uart.send(msg)
+    de9_rx = de9_uart.receive(64)
+    if de9_rx:
+        print("[UART_DE9] RX: " + de9_rx.strip())
     try:
         rx = ble.read_available()
         if rx:
