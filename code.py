@@ -25,7 +25,7 @@ STATE_BLE_DISCONNECTED = "BLE_DISCONNECTED"
 STATE_HALTED = "HALTED"
 STATE_DROPPING_CLAW = "DROPPING_CLAW"
 
-TARGET_NAME = "CLAW_RX_1292"
+TARGET_NAME = "CLAW_RX__1292"
 LOOP_DT = 0.2
 MAX_SCAN_ATTEMPTS = 3
 STREAM_OPEN_TIMEOUT = 10.0
@@ -91,12 +91,20 @@ def handle_initialization():
     ble.set_pairing_mode(mode=0)
     print("[CENTRAL] Rebooting to apply settings...")
     ble.reboot()
-    time.sleep(1.0)
-    print("[CENTRAL] Reboot complete, re-entering command mode...")
+    time.sleep(2.0)
+    print("[CENTRAL] Reboot complete")
+    while uart.in_waiting:
+        data = uart.read(uart.in_waiting)
+        print("[CENTRAL] Drained:", data)
+    time.sleep(0.5)
+    print("[CENTRAL] Re-entering command mode...")
+    ble._in_command_mode = False
     ble.enter_command_mode()
+    print("[CENTRAL] In command mode:", ble.in_command_mode)
     time.sleep(0.3)
     print("[CENTRAL] Ready to scan")
     enter_state(STATE_SCANNING_FOR_CLAW)
+
 
 
 
@@ -104,6 +112,10 @@ def handle_scanning():
     global scan_attempts, target
     update_lcd("Searching for", "target", "peripheral...")
     print("[CENTRAL] Scanning attempt " + str(scan_attempts + 1))
+    # Drain UART and add delay before scan
+    while uart.in_waiting:
+        uart.read(uart.in_waiting)
+    time.sleep(0.3)
     try:
         devices = ble.scan(interval_ms=100, window_ms=80)
     except RNBD451Error as e:
