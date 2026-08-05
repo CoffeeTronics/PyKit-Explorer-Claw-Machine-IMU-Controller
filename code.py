@@ -89,7 +89,15 @@ def handle_initialization():
     print("[CENTRAL] Firmware:", ble.get_firmware_version())
     ble.set_default_services(transparent_uart=True)
     ble.set_pairing_mode(mode=0)
+    print("[CENTRAL] Rebooting to apply settings...")
+    ble.reboot()
+    time.sleep(1.0)
+    print("[CENTRAL] Reboot complete, re-entering command mode...")
+    ble.enter_command_mode()
+    time.sleep(0.3)
+    print("[CENTRAL] Ready to scan")
     enter_state(STATE_SCANNING_FOR_CLAW)
+
 
 
 def handle_scanning():
