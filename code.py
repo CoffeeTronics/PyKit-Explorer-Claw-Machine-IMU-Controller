@@ -75,6 +75,19 @@ RECONNECT_SLOW_INTERVAL = 30.0
 RECONNECT_RARE_INTERVAL = 300.0
 DEVICE_COUNT_THRESHOLD = 200
 
+# Motor control
+DEADZONE_DEG = 5.0           # IMU tilt below this = stopped
+MAX_TILT_DEG = 45.0          # Full speed at this tilt
+MAX_VELOCITY_MTURNS = 5000   # milli-motor-turns/s at max tilt
+
+# Joint-to-node mapping (node IDs match SAME70 CAN config)
+JOINT_MAP = {
+    'J1': 0,   # Base yaw - controlled by IMU yaw
+    'J2': 1,   # Shoulder - controlled by IMU pitch
+    'J3': 2,   # Elbow - controlled by IMU pitch (linked to J2)
+    'J5': 3,   # Wrist pitch - controlled by IMU roll
+}
+
 # Recovery timing
 RECOVERY_LEVEL1_WAIT = 0.1
 RECOVERY_LEVEL2_WAIT = 2.0
@@ -126,6 +139,10 @@ recovery_level = 1
 recovery_attempts = 0
 disconnect_time = 0.0
 last_reconnect_attempt = 0.0
+
+# Debug counters
+debug_cmd_count = 0
+debug_last_cmd_time = 0.0
 
 # Hardware references (initialized later)
 ble = None
@@ -359,6 +376,93 @@ def process_received_line(line, source):
     elif line.startswith(MSG_PREFIX_CMD):
         print("[" + source + "_STATUS] Command: " + line[1:])
 
+
+# =============================================================================
+# Motor Control Functions
+# =============================================================================
+
+def angle_to_velocity(angle_deg):
+    """Convert IMU angle to motor velocity (milli-turns/s)"""
+    if abs(angle_deg) < DEADZONE_DEG:
+        return 0
+    # Linear scaling from deadzone to max
+    sign = 1 if angle_deg > 0 else -1
+    magnitude = abs(angle_deg) - DEADZONE_DEG
+    scaled = (magnitude / (MAX_TILT_DEG - DEADZONE_DEG)) * MAX_VELOCITY_MTURNS
+    return int(sign * min(scaled, MAX_VELOCITY_MTURNS))
+
+def send_both(msg):
+    """Send message on both BLE and USART channels"""
+    global ble_connected, debug_cmd_count, debug_last_cmd_time
+    debug_cmd_count += 1
+    now = time.monotonic()
+    # Print every 10th command or if more than 2 sec since last print
+    if debug_cmd_count % 10 == 1 or (now - debug_last_cmd_time) > 2.0:
+        print("[DEBUG] cmd #" + str(debug_cmd_count) + " BLE=" + str(ble_connected) + " msg=" + msg.strip()[:30])
+        debug_last_cmd_time = now
+    if ble_connected:
+        try:
+            ble.write(msg.encode())
+        except Exception as e:
+            print("[BLE_ERROR] Write #" + str(debug_cmd_count) + " failed: " + str(e))
+            ble_connected = False
+    de9_uart.send(msg)
+
+def send_motor_commands(pitch, roll, yaw):
+    """Send velocity commands based on IMU orientation.
+    
+    Always sends on BOTH channels (BLE + USART) for redundancy.
+    If BLE fails, USART continues uninterrupted.
+    """
+    global debug_cmd_count
+    # Yaw -> J1 (base rotation)
+    v_j1 = angle_to_velocity(yaw)
+    v_j2 = angle_to_velocity(pitch)
+    v_j3 = angle_to_velocity(pitch)
+    v_j5 = angle_to_velocity(roll)
+    
+    if debug_cmd_count % 50 == 0:
+        print("[MOTOR] p=" + str(round(pitch,1)) + " r=" + str(round(roll,1)) + " y=" + str(round(yaw,1)))
+        print("[VEL] J1=" + str(v_j1) + " J2=" + str(v_j2) + " J3=" + str(v_j3) + " J5=" + str(v_j5))
+    
+    # Pitch -> J2 + J3 (shoulder + elbow, linked)
+    v_j2 = angle_to_velocity(pitch)
+    v_j3 = angle_to_velocity(pitch)  # Same as J2, linked
+    
+    # Roll -> J5 (wrist pitch)
+    v_j5 = angle_to_velocity(roll)
+    
+    # Build and send commands on BOTH channels
+    for joint, vel in [('J1', v_j1), ('J2', v_j2), ('J3', v_j3), ('J5', v_j5)]:
+        node = JOINT_MAP[joint]
+        msg = "V," + str(node) + "," + str(vel) + "\n"
+        send_both(msg)
+
+def stop_all_motors():
+    """Send STOP to all motors on both channels"""
+    msg = "STOP\n"
+    send_both(msg)
+    print("[MOTOR] Stopped all motors")
+
+def arm_and_home_motors():
+    """Arm all joints and move to HOME position"""
+    print("[MOTOR] Arming and homing all joints")
+    
+    # Arm all joints for velocity control
+    for joint, node in JOINT_MAP.items():
+        msg = "GO," + str(node) + "\n"
+        send_both(msg)
+        print("[MOTOR] Armed " + joint + " (node " + str(node) + ")")
+        time.sleep(0.1)  # Small delay between arming
+    
+    # Move all joints to HOME (zero position)
+    for joint, node in JOINT_MAP.items():
+        msg = "N," + str(node) + ",0\n"
+        send_both(msg)
+        print("[MOTOR] Homing " + joint)
+        time.sleep(0.05)
+    
+    print("[MOTOR] All joints armed and moving to HOME")
 # =============================================================================
 # Failover Logic
 # =============================================================================
@@ -662,15 +766,30 @@ def handle_connecting():
         print("[CENTRAL] Connecting...")
         ble.connect(target["address"], target["addr_type"], timeout=15.0)
         print("[CENTRAL] Connected to " + str(ble.peer_address))
+        
+        # Add delay before exiting command mode to let connection stabilize
+        print("[CENTRAL] Waiting 500ms for connection to stabilize...")
+        time.sleep(0.5)
+        
+        print("[CENTRAL] Exiting command mode...")
         ble.exit_command_mode()
-        print("[CENTRAL] Waiting for STREAM_OPEN...")
+        print("[CENTRAL] Command mode exited, waiting for STREAM_OPEN...")
 
+        # Drain any buffered data first
+        while uart.in_waiting:
+            raw = uart.read(uart.in_waiting)
+            print("[CENTRAL] Drained before STREAM_OPEN: " + repr(raw))
+        
         if ble.wait_for_stream_open(timeout=STREAM_OPEN_TIMEOUT):
             print("[CENTRAL] STREAM_OPEN received")
             ble_connected = True
             enter_state(STATE_BLE_CONNECTED)
         else:
-            print("[CENTRAL] STREAM_OPEN not received")
+            print("[CENTRAL] STREAM_OPEN not received after " + str(STREAM_OPEN_TIMEOUT) + "s")
+            # Try to see what we DID receive
+            if uart.in_waiting:
+                raw = uart.read(uart.in_waiting)
+                print("[CENTRAL] Received instead: " + repr(raw))
             update_lcd("Connect to Claw", "Failed,", "Reset PyKit")
             enter_state(STATE_HALTED)
     except RNBD451Error as e:
@@ -717,14 +836,16 @@ def handle_calibrate_zero():
             time.sleep(1)
 
 def handle_send_zero_position():
-    print("[CENTRAL] Sending Move to Home Position")
-
-    # Send ACTIVE command to SAME70
-    if send_command("CMD", "ACTIVE"):
-        enter_state(STATE_START_IMU_TX)
-    else:
-        print("[ERROR] Failed to get ACK for ACTIVE command")
-        enter_state(STATE_ERROR_RECOVERY)
+    """Arm all joints and move to HOME position before IMU streaming"""
+    print("[CENTRAL] Arming motors and moving to HOME position")
+    
+    # Arm and home all motors (sends on both BLE + USART)
+    arm_and_home_motors()
+    
+    # Give motors time to reach home position
+    time.sleep(1.0)
+    
+    enter_state(STATE_START_IMU_TX)
 
 def handle_start_imu_tx():
     if time.monotonic() - state_entry_time < 0.3:
@@ -733,9 +854,15 @@ def handle_start_imu_tx():
     if time.monotonic() - state_entry_time > IMU_START_DISPLAY_TIME:
         enter_state(STATE_SEND_IMU_DATA)
 
+# Stale IMU detection
+last_imu_values = (None, None, None)
+stale_imu_count = 0
+STALE_THRESHOLD = 20  # Reset IMU if values unchanged for this many reads
+
 def handle_send_imu_data():
     global imu_error_count, locked_pitch, locked_roll, locked_yaw
     global ble_connected, disconnect_time
+    global last_imu_values, stale_imu_count
 
     button.update()
     drop_claw_button.update()
@@ -755,7 +882,26 @@ def handle_send_imu_data():
     try:
         roll, pitch, yaw = imu.euler_angles_game
         imu_error_count = 0
-    except (OSError, KeyError) as e:
+
+        # Check for stale data (IMU frozen)
+        current_values = (round(roll, 1), round(pitch, 1), round(yaw, 1))
+        if current_values == last_imu_values:
+            stale_imu_count += 1
+            if stale_imu_count >= STALE_THRESHOLD:
+                print("[IMU] Stale data detected, resetting IMU")
+                try:
+                    imu.soft_reset()
+                    time.sleep(0.1)
+                    imu.enable_game_rotation_vector()
+                except Exception as e:
+                    print("[IMU] Reset failed:", e)
+                stale_imu_count = 0
+                return  # Skip this cycle, fresh data next time
+        else:
+            stale_imu_count = 0
+        last_imu_values = current_values
+
+    except (OSError, KeyError, RuntimeError) as e:
         imu_error_count += 1
         print("[CENTRAL] IMU error, skipping")
         if imu_error_count > 5:
@@ -770,6 +916,15 @@ def handle_send_imu_data():
     rel_roll = roll - zero_roll
     rel_pitch = pitch - zero_pitch
     rel_yaw = yaw - zero_yaw
+    # Normalize all angles to -180 to +180 range
+    if rel_pitch > 180:
+        rel_pitch -= 360
+    elif rel_pitch < -180:
+        rel_pitch += 360
+    if rel_roll > 180:
+        rel_roll -= 360
+    elif rel_roll < -180:
+        rel_roll += 360
     if rel_yaw > 180:
         rel_yaw -= 360
     elif rel_yaw < -180:
@@ -790,7 +945,7 @@ def handle_send_imu_data():
     update_lcd("Pitch: " + p, "Roll:  " + r, "Yaw:   " + y)
 
     # Send IMU data
-    send_imu_data(rel_pitch, rel_roll, rel_yaw, active_channel)
+    send_motor_commands(rel_pitch, rel_roll, rel_yaw)
 
     # Check for incoming data
     check_incoming_data()
@@ -813,7 +968,7 @@ def handle_dropping_claw():
     y = str(round(locked_yaw, 1))
 
     # Send locked position
-    send_imu_data(locked_pitch, locked_roll, locked_yaw, active_channel)
+    send_motor_commands(locked_pitch, locked_roll, locked_yaw)
 
     # Check for incoming data
     check_incoming_data()
@@ -864,7 +1019,7 @@ def handle_ble_disconnected():
         elif rel_yaw < -180:
             rel_yaw += 360
 
-        send_imu_data(rel_pitch, rel_roll, rel_yaw, "USART")
+        send_motor_commands(rel_pitch, rel_roll, rel_yaw)
         check_incoming_data()
     except:
         pass

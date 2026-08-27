@@ -112,7 +112,7 @@ class IMUSensor:
             )
 
         if i2c is None:
-            i2c = busio.I2C(board.SCL, board.SDA, frequency=400000)
+            i2c = busio.I2C(board.SCL, board.SDA, frequency=100000)  # 100kHz for weak pullups
 
         self._address = address
         if address == _ALTERNATE_ADDRESS:
