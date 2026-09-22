@@ -652,15 +652,22 @@ class RNBD451:
         """
         Block until %STREAM_OPEN% is received (transparent UART ready).
         Returns True on success.
+
+        Accumulates data across reads to handle cases where the status
+        message is split across UART read boundaries.
         """
         self._stream_open = False
         deadline = time.monotonic() + timeout
+        buf = bytearray()
         while time.monotonic() < deadline:
-            line = self._readline(timeout=0.2)
-            if line:
-                self._handle_async(line)
-                if self._stream_open:
+            chunk = self._uart.read(64)
+            if chunk:
+                buf.extend(chunk)
+                if _S_STREAM_OPEN in buf:
+                    self._stream_open = True
                     return True
+            else:
+                time.sleep(0.01)
         return False
 
     # ── Properties ────────────────────────────────────────────────────────────
